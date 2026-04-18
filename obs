@@ -1,0 +1,1504 @@
+#!/bin/bash
+#
+# obs — Obsidian 研究笔记 CLI
+# https://github.com/kkkevinky/obs-research-cli
+#
+
+set -e
+
+# ── vault detection ──────────────────────────────────────
+
+find_vault() {
+  local dir="$PWD"
+  while [ "$dir" != "/" ]; do
+    if [ -d "$dir/.obsidian" ]; then
+      echo "$dir"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+require_vault() {
+  VAULT=$(find_vault) || {
+    echo "错误：当前目录不在 Obsidian vault 中" >&2
+    echo "请先 cd 到你的 vault 目录，或运行 obs init 初始化" >&2
+    exit 1
+  }
+}
+
+# ── config ───────────────────────────────────────────────
+
+CONFIG_FILE=".obs-config"
+
+read_config() {
+  local key="$1"
+  local config="$VAULT/$CONFIG_FILE"
+  if [ -f "$config" ]; then
+    grep "^${key}=" "$config" 2>/dev/null | cut -d= -f2-
+  fi
+}
+
+load_config() {
+  VAULT_NAME=$(read_config "VAULT_NAME")
+  if [ -z "$VAULT_NAME" ]; then
+    VAULT_NAME=$(basename "$VAULT")
+  fi
+
+  local folders_str
+  folders_str=$(read_config "FOLDERS")
+  IFS=',' read -ra FOLDERS <<< "$folders_str"
+
+  local tags_str
+  tags_str=$(read_config "TAGS")
+  IFS=',' read -ra ALL_TAGS <<< "$tags_str"
+}
+
+# ── helpers ──────────────────────────────────────────────
+
+open_in_obsidian() {
+  local rel="${1#$VAULT/}"
+  rel="${rel%.md}"
+  local encoded="${rel// /%20}"
+  encoded="${encoded//\//%2F}"
+  if command -v open &>/dev/null; then
+    open "obsidian://open?vault=${VAULT_NAME}&file=${encoded}"
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "obsidian://open?vault=${VAULT_NAME}&file=${encoded}"
+  else
+    echo "提示：请手动在 Obsidian 中打开 ${rel}.md" >&2
+  fi
+}
+
+pick_tags() {
+  if [ ${#ALL_TAGS[@]} -eq 0 ]; then
+    echo "[]"
+    return
+  fi
+
+  echo "" >&2
+  echo "选择 tag（输入编号，多个用空格隔开，直接回车跳过）：" >&2
+  for i in "${!ALL_TAGS[@]}"; do
+    printf "  %d) %s" "$((i+1))" "${ALL_TAGS[$i]}" >&2
+    if (( (i+1) % 3 == 0 )); then
+      echo "" >&2
+    fi
+  done
+  echo "" >&2
+  printf "你的选择: " >&2
+  read -r choices
+
+  local selected=()
+  for c in $choices; do
+    local idx=$((c-1))
+    if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#ALL_TAGS[@]}" ]; then
+      selected+=("${ALL_TAGS[$idx]}")
+    fi
+  done
+
+  if [ ${#selected[@]} -eq 0 ]; then
+    echo "[]"
+  else
+    local yaml="["
+    for i in "${!selected[@]}"; do
+      if [ "$i" -gt 0 ]; then yaml+=", "; fi
+      yaml+="${selected[$i]}"
+    done
+    yaml+="]"
+    echo "$yaml"
+  fi
+}
+
+safe_path() {
+  local dir="$1" name="$2" ext="$3"
+  local path="$dir/$name$ext"
+  local n=2
+  while [ -f "$path" ]; do
+    path="$dir/${name}_${n}${ext}"
+    n=$((n+1))
+  done
+  echo "$path"
+}
+
+require_input() {
+  local prompt="$1" result=""
+  while [ -z "$result" ]; do
+    printf "%s" "$prompt" >&2
+    read -r result
+    if [ -z "$result" ]; then
+      echo "  (不能为空，请重新输入)" >&2
+    fi
+  done
+  echo "$result"
+}
+
+pick_folder() {
+  echo "" >&2
+  echo "选择文件夹：" >&2
+  local project_folders=()
+  for f in "${FOLDERS[@]}"; do
+    case "$f" in
+      Literature|Concepts|templates|attachments) ;;
+      *) project_folders+=("$f") ;;
+    esac
+  done
+
+  for i in "${!project_folders[@]}"; do
+    echo "  $((i+1))) ${project_folders[$i]}" >&2
+  done
+  printf "你的选择: " >&2
+  read -r choice
+
+  local idx=$((choice-1))
+  if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#project_folders[@]}" ]; then
+    echo "${project_folders[$idx]}"
+  else
+    echo "无效选择" >&2
+    return 1
+  fi
+}
+
+# collect all vault .md files (excluding system dirs), store in MD_FILES array
+collect_md_files() {
+  MD_FILES=()
+  while IFS= read -r f; do
+    [ -n "$f" ] && MD_FILES+=("$f")
+  done < <(find "$VAULT" -name "*.md" \
+    -not -path "*/.obsidian/*" \
+    -not -path "*/templates/*" \
+    -not -path "*/obs-research-cli/*" \
+    -not -path "*/obs-cli/*" \
+    2>/dev/null)
+}
+
+# ── commands ─────────────────────────────────────────────
+
+cmd_init() {
+  if [ ! -d ".obsidian" ]; then
+    echo "错误：当前目录不是 Obsidian vault 根目录（没有找到 .obsidian/）" >&2
+    echo "请先 cd 到你的 Obsidian vault 根目录" >&2
+    exit 1
+  fi
+
+  # Already initialized → enter update mode
+  if [ -f "$CONFIG_FILE" ]; then
+    VAULT="$PWD"
+    load_config
+    cmd_init_update
+    return
+  fi
+
+  echo "── obs init ──"
+  echo ""
+  echo "初始化你的研究笔记系统。"
+  echo ""
+
+  local default_name
+  default_name=$(basename "$PWD")
+  printf "Vault 名称 [%s]: " "$default_name"
+  read -r vault_name
+  if [ -z "$vault_name" ]; then
+    vault_name="$default_name"
+  fi
+
+  echo ""
+  echo "你的研究项目有哪些？（用逗号分隔）"
+  echo "例如：Time-Perception,Time-Discrimination"
+  local projects=""
+  while [ -z "$projects" ]; do
+    printf "项目名称: "
+    read -r projects
+    if [ -z "$projects" ]; then echo "  (不能为空，请重新输入)"; fi
+  done
+
+  echo ""
+  echo "常用 tag 有哪些？（用逗号分隔）"
+  echo "例如：perception,discrimination,reproduction,estimation,review,todo"
+  local tags=""
+  while [ -z "$tags" ]; do
+    printf "Tag 列表: "
+    read -r tags
+    if [ -z "$tags" ]; then echo "  (不能为空，请重新输入)"; fi
+  done
+
+  local all_folders="Literature,${projects},Concepts"
+
+  echo ""
+  IFS=',' read -ra folder_arr <<< "$all_folders"
+  for folder in "${folder_arr[@]}"; do
+    folder=$(echo "$folder" | xargs)
+    mkdir -p "$folder"
+    echo "  创建文件夹: $folder/"
+  done
+  mkdir -p templates attachments Inbox
+  echo "  创建文件夹: templates/"
+  echo "  创建文件夹: attachments/"
+  echo "  创建文件夹: Inbox/"
+
+  cat > "$CONFIG_FILE" << EOF
+VAULT_NAME=$vault_name
+FOLDERS=$all_folders
+TAGS=$tags
+EOF
+  echo "  创建配置: $CONFIG_FILE"
+
+  cat > "templates/literature-note.md" << 'TMPL'
+---
+tags: []
+year:
+authors:
+journal:
+doi:
+---
+
+## Summary / 核心发现
+<!-- 2–3 sentences on the key findings / 2–3 句概括核心发现 -->
+
+## Methods / 方法
+<!-- Paradigm, participants, key variables / 实验范式、被试、关键变量 -->
+
+## Relevance / 与我研究的关系
+<!-- How does this relate to my research? / 对我的研究有什么启发？ -->
+
+## Key concepts / 关键概念
+<!-- Link related notes with `[[note name]]` / 用 `[[笔记名]]` 链接相关笔记 -->
+TMPL
+  echo "  创建模板: templates/literature-note.md"
+
+  cat > "templates/research-note.md" << 'TMPL'
+---
+tags: []
+date:
+---
+
+## Idea / 想法
+<!-- Thoughts, questions, hypotheses / 灵感、问题、假设 -->
+
+## Related literature / 相关文献
+<!-- Link existing literature notes with `[[note name]]` / 用 `[[笔记名]]` 链接已有文献笔记 -->
+
+## Next steps / 下一步
+<!-- What to do next? / 接下来要做什么？ -->
+TMPL
+  echo "  创建模板: templates/research-note.md"
+
+  cat > "START HERE.md" << GUIDE
+# Workflow Guide / 工作流指南
+
+## Commands / 快捷命令
+
+Run these in a terminal from your vault directory.
+在终端中 cd 到此 vault 目录后运行：
+
+| Command / 命令 | Purpose / 做什么 |
+|----------------|-----------------|
+| \`obs quick "idea"\` | Zero-interaction quick capture / 零交互快速记录 |
+| \`obs lit\` | New literature note / 新建文献笔记 |
+| \`obs bib <DOI>\` | Auto-create literature note from DOI / 用 DOI 自动创建文献笔记 |
+| \`obs idea\` | New research idea / 新建研究想法 |
+| \`obs concept\` | New concept card / 新建概念卡片 |
+| \`obs find\` | Search notes / 搜索笔记 |
+| \`obs list\` | Recently modified notes / 查看最近修改的笔记 |
+| \`obs status\` | Research dashboard / 研究仪表盘 |
+| \`obs moc <tag>\` | Generate Map of Content for a tag / 生成某个 tag 的索引 |
+| \`obs links\` | Find missing wikilinks / 发现缺失的链接 |
+| \`obs export <tag>\` | Export literature table / 导出文献表格 |
+
+Follow the prompts — the note is created and opened in Obsidian automatically.
+按提示填写即可，笔记会自动创建并在 Obsidian 中打开。
+
+---
+
+## Writing habit / 写笔记时的习惯
+
+When you encounter an important concept, wrap it in double brackets: \`[[concept name]]\`.
+遇到重要概念，用双括号括起来：\`[[概念名]]\`。
+
+You don't need to create the target note first — Obsidian tracks all references automatically.
+不用先创建目标笔记，Obsidian 会自动追踪所有引用。
+GUIDE
+  echo "  创建指南: START HERE.md"
+
+  # Configure Obsidian graph filter to hide system files (templates/, START HERE)
+  if command -v python3 &>/dev/null; then
+    python3 - << 'PYEOF' || true
+import json, os
+path = ".obsidian/graph.json"
+filter_str = '-path:"templates" -file:"START HERE"'
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    cfg = {}
+if cfg.get("search"):
+    print(f"  跳过图谱过滤器：已存在自定义过滤器")
+else:
+    cfg["search"] = filter_str
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+    print("  配置图谱过滤器：排除 templates/ 和 START HERE")
+PYEOF
+  else
+    echo "  跳过图谱过滤器（未安装 python3）"
+    echo "  可手动在 Obsidian 图谱 Filters 中添加：-path:\"templates\" -file:\"START HERE\""
+  fi
+
+  echo ""
+  echo "✓ 初始化完成！输入 obs 查看所有命令。"
+}
+
+# ── obs init (update mode) ───────────────────────────────
+
+write_config() {
+  local folders_str tags_str
+  folders_str=$(IFS=,; echo "${FOLDERS[*]}")
+  tags_str=$(IFS=,; echo "${ALL_TAGS[*]}")
+  cat > "$VAULT/$CONFIG_FILE" << EOF
+VAULT_NAME=$VAULT_NAME
+FOLDERS=$folders_str
+TAGS=$tags_str
+EOF
+}
+
+update_add_project() {
+  printf "新项目文件夹名称: "
+  read -r new_name
+  new_name=$(echo "$new_name" | xargs)
+  if [ -z "$new_name" ]; then
+    echo "名称不能为空" >&2; return 1
+  fi
+  for f in "${FOLDERS[@]}"; do
+    if [ "$f" = "$new_name" ]; then
+      echo "文件夹 '$new_name' 已存在" >&2; return 1
+    fi
+  done
+  mkdir -p "$VAULT/$new_name"
+  FOLDERS+=("$new_name")
+  write_config
+  echo "✓ 已添加项目：$new_name"
+}
+
+update_add_tag() {
+  printf "新 tag 名称: "
+  read -r new_tag
+  new_tag=$(echo "$new_tag" | xargs)
+  if [ -z "$new_tag" ]; then
+    echo "名称不能为空" >&2; return 1
+  fi
+  for t in "${ALL_TAGS[@]}"; do
+    if [ "$t" = "$new_tag" ]; then
+      echo "Tag '$new_tag' 已存在" >&2; return 1
+    fi
+  done
+  ALL_TAGS+=("$new_tag")
+  write_config
+  echo "✓ 已添加 tag：$new_tag"
+}
+
+update_remove_tag() {
+  if [ ${#ALL_TAGS[@]} -eq 0 ]; then
+    echo "当前没有 tag 可以删除" >&2; return 1
+  fi
+  echo ""
+  echo "选择要删除的 tag："
+  for i in "${!ALL_TAGS[@]}"; do
+    echo "  $((i+1))) ${ALL_TAGS[$i]}"
+  done
+  printf "你的选择: "
+  read -r choice
+  local idx=$((choice-1))
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$idx" -lt 0 ] || [ "$idx" -ge "${#ALL_TAGS[@]}" ]; then
+    echo "无效选择" >&2; return 1
+  fi
+  local removed="${ALL_TAGS[$idx]}"
+  local new_tags=()
+  for i in "${!ALL_TAGS[@]}"; do
+    if [ "$i" != "$idx" ]; then
+      new_tags+=("${ALL_TAGS[$i]}")
+    fi
+  done
+  ALL_TAGS=("${new_tags[@]}")
+  write_config
+  echo "✓ 已删除 tag：$removed"
+}
+
+# Scan vault for all tags used in notes. Case-insensitive dedup (keep first-seen casing).
+# Outputs unique tags, one per line, sorted case-insensitively.
+collect_vault_tags() {
+  python3 - "$VAULT" << 'PYEOF' 2>/dev/null
+import sys, re
+from pathlib import Path
+
+vault = sys.argv[1]
+exclude = ['/.obsidian/', '/templates/', '/obs-research-cli/', '/obs-cli/']
+seen = {}  # lowercase -> original casing (first seen wins)
+
+def add(tag):
+    tag = tag.strip()
+    if not tag:
+        return
+    key = tag.lower()
+    if key not in seen:
+        seen[key] = tag
+
+for md in Path(vault).rglob("*.md"):
+    p = str(md)
+    if any(ex in p for ex in exclude):
+        continue
+    try:
+        content = md.read_text(encoding='utf-8', errors='ignore')
+    except Exception:
+        continue
+
+    # Split frontmatter from body
+    fm = ''
+    body = content
+    fm_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
+    if fm_match:
+        fm = fm_match.group(1)
+        body = content[fm_match.end():]
+
+    # Frontmatter: inline list  tags: [a, b]
+    for m in re.finditer(r'^tag(?:s)?:\s*\[(.*?)\]', fm, re.MULTILINE):
+        for t in m.group(1).split(','):
+            add(t.strip().strip('"').strip("'"))
+    # Frontmatter: list form
+    # tags:
+    #   - a
+    for m in re.finditer(r'^tag(?:s)?:\s*\n((?:\s+-\s+[^\n]+\n?)+)', fm, re.MULTILINE):
+        for line in m.group(1).split('\n'):
+            line = line.strip()
+            if line.startswith('- '):
+                add(line[2:].strip().strip('"').strip("'"))
+    # Frontmatter: string form  tags: foo
+    for m in re.finditer(r'^tag(?:s)?:[ \t]+([^\[\s\n][^\n]*)', fm, re.MULTILINE):
+        val = m.group(1).strip().strip('"').strip("'")
+        if val and not val.startswith('['):
+            add(val)
+
+    # Strip code blocks and markdown links to avoid false positives
+    body = re.sub(r'```.*?```', '', body, flags=re.DOTALL)
+    body = re.sub(r'`[^`\n]*`', '', body)
+    body = re.sub(r'\[[^\]]*\]\([^)]*\)', '', body)
+
+    # Inline #tags
+    for m in re.finditer(r'(?<![\w#])#([\w\-/]+)', body):
+        t = m.group(1)
+        if t.isdigit():
+            continue
+        if not any(c.isalpha() for c in t):
+            continue
+        add(t)
+
+for t in sorted(seen.values(), key=str.lower):
+    print(t)
+PYEOF
+}
+
+update_sync_tags() {
+  if ! command -v python3 &>/dev/null; then
+    echo "错误：同步 tag 需要 python3" >&2
+    return 1
+  fi
+
+  echo ""
+  echo "正在扫描 vault..."
+  local discovered
+  discovered=$(collect_vault_tags)
+
+  if [ -z "$discovered" ]; then
+    echo "未在 vault 中发现任何 tag"
+    return 0
+  fi
+
+  # Compute new tags: discovered - ALL_TAGS (case-insensitive compare)
+  local existing_lc=()
+  for t in "${ALL_TAGS[@]}"; do
+    existing_lc+=("$(echo "$t" | tr '[:upper:]' '[:lower:]')")
+  done
+
+  local new_tags=()
+  while IFS= read -r tag; do
+    [ -z "$tag" ] && continue
+    local tag_lc
+    tag_lc=$(echo "$tag" | tr '[:upper:]' '[:lower:]')
+    local found=false
+    for e in "${existing_lc[@]}"; do
+      if [ "$e" = "$tag_lc" ]; then found=true; break; fi
+    done
+    if ! $found; then
+      new_tags+=("$tag")
+    fi
+  done <<< "$discovered"
+
+  if [ ${#new_tags[@]} -eq 0 ]; then
+    echo "✓ .obs-config 已包含 vault 中所有 tag（大小写不敏感），无需同步"
+    return 0
+  fi
+
+  echo ""
+  echo "发现 ${#new_tags[@]} 个新 tag："
+  for i in "${!new_tags[@]}"; do
+    echo "  $((i+1))) ${new_tags[$i]}"
+  done
+  echo ""
+  printf "有要剔除的吗？（输入编号，多个用空格隔开，回车跳过）: "
+  read -r drop_input
+
+  # Filter out dropped indices
+  local keep_tags=()
+  if [ -n "$drop_input" ]; then
+    local drop_set=" "
+    for c in $drop_input; do
+      if [[ "$c" =~ ^[0-9]+$ ]]; then
+        drop_set+="$c "
+      fi
+    done
+    for i in "${!new_tags[@]}"; do
+      local num=$((i+1))
+      if [[ "$drop_set" != *" $num "* ]]; then
+        keep_tags+=("${new_tags[$i]}")
+      fi
+    done
+  else
+    keep_tags=("${new_tags[@]}")
+  fi
+
+  if [ ${#keep_tags[@]} -eq 0 ]; then
+    echo "所有 tag 都被剔除，已取消"
+    return 0
+  fi
+
+  echo ""
+  echo "将添加以下 ${#keep_tags[@]} 个 tag 到 .obs-config："
+  echo "  ${keep_tags[*]}"
+  echo ""
+  printf "确认？ [Y/n]: "
+  read -r confirm
+  case "$confirm" in
+    n|N|no|No|NO)
+      echo "已取消"
+      return 0
+      ;;
+  esac
+
+  ALL_TAGS+=("${keep_tags[@]}")
+  write_config
+  echo "✓ 已同步 ${#keep_tags[@]} 个 tag"
+}
+
+cmd_init_update() {
+  echo "── obs 更新配置 ──"
+  echo ""
+  echo "当前 vault: $VAULT_NAME"
+  echo "项目文件夹: ${FOLDERS[*]}"
+  echo "Tags: ${ALL_TAGS[*]}"
+  echo ""
+  echo "可用操作："
+  echo "  1) 添加新项目文件夹"
+  echo "  2) 添加 tag"
+  echo "  3) 删除 tag"
+  echo "  4) 从 vault 同步 tag（扫描所有笔记自动发现 tag）"
+  echo "  5) 退出"
+  echo ""
+  echo "（如需从零重新初始化，请先删除 .obs-config 后再运行 obs init）"
+  echo ""
+  printf "请选择 (1-5): "
+  read -r choice
+
+  case "$choice" in
+    1) update_add_project ;;
+    2) update_add_tag ;;
+    3) update_remove_tag ;;
+    4) update_sync_tags ;;
+    5) return 0 ;;
+    *) echo "无效选择" >&2; return 1 ;;
+  esac
+}
+
+# ── obs tag ──────────────────────────────────────────────
+
+cmd_tag() {
+  require_vault
+  load_config
+
+  echo "── obs tag ──"
+  echo ""
+  echo "当前 tags (${#ALL_TAGS[@]}): ${ALL_TAGS[*]}"
+  echo ""
+  echo "可用操作："
+  echo "  1) 添加 tag"
+  echo "  2) 删除 tag"
+  echo "  3) 从 vault 同步 tag"
+  echo "  4) 退出"
+  echo ""
+  printf "请选择 (1-4): "
+  read -r choice
+
+  case "$choice" in
+    1) update_add_tag ;;
+    2) update_remove_tag ;;
+    3) update_sync_tags ;;
+    4) return 0 ;;
+    *) echo "无效选择" >&2; return 1 ;;
+  esac
+}
+
+# ── obs lit ──────────────────────────────────────────────
+
+cmd_lit() {
+  require_vault
+  load_config
+
+  echo "── 新建文献笔记 ──"
+  echo ""
+
+  local author year title tags
+
+  author=$(require_input "第一作者姓（如 Grondin）: ")
+  year=$(require_input "年份（如 2024）: ")
+  title=$(require_input "简短标题（如 Duration Review）: ")
+  tags=$(pick_tags)
+
+  local filename="$author $year - $title"
+  local filepath
+  filepath=$(safe_path "$VAULT/Literature" "$filename" ".md")
+
+  cat > "$filepath" << HEREDOC
+---
+tags: $tags
+year: $year
+authors: $author
+journal:
+doi:
+---
+
+## Summary / 核心发现
+<!-- 2–3 sentences on the key findings / 2–3 句概括核心发现 -->
+
+## Methods / 方法
+<!-- Paradigm, participants, key variables / 实验范式、被试、关键变量 -->
+
+## Relevance / 与我研究的关系
+<!-- How does this relate to my research? / 对我的研究有什么启发？ -->
+
+## Key concepts / 关键概念
+<!-- Link related notes with \`[[note name]]\` / 用 \`[[笔记名]]\` 链接相关笔记 -->
+HEREDOC
+
+  echo ""
+  echo "✓ 已创建: ${filepath#$VAULT/}"
+  open_in_obsidian "$filepath"
+}
+
+# ── obs idea ─────────────────────────────────────────────
+
+cmd_idea() {
+  require_vault
+  load_config
+
+  echo "── 新建研究想法 ──"
+  echo ""
+
+  local folder
+  folder=$(pick_folder) || return 1
+
+  local title
+  title=$(require_input "笔记标题（你在想什么？）: ")
+
+  local tags
+  tags=$(pick_tags)
+
+  local today
+  today=$(date +%Y-%m-%d)
+  local filename="$today $title"
+  local filepath
+  filepath=$(safe_path "$VAULT/$folder" "$filename" ".md")
+
+  cat > "$filepath" << HEREDOC
+---
+tags: $tags
+date: $today
+---
+
+## Idea / 想法
+<!-- Thoughts, questions, hypotheses / 灵感、问题、假设 -->
+
+## Related literature / 相关文献
+<!-- Link existing literature notes with \`[[note name]]\` / 用 \`[[笔记名]]\` 链接已有文献笔记 -->
+
+## Next steps / 下一步
+<!-- What to do next? / 接下来要做什么？ -->
+HEREDOC
+
+  echo ""
+  echo "✓ 已创建: ${filepath#$VAULT/}"
+  open_in_obsidian "$filepath"
+}
+
+# ── obs concept ──────────────────────────────────────────
+
+cmd_concept() {
+  require_vault
+  load_config
+
+  echo "── 新建概念卡片 ──"
+  echo ""
+
+  local name
+  name=$(require_input "概念名称（如 Scalar Property）: ")
+
+  local filepath
+  filepath=$(safe_path "$VAULT/Concepts" "$name" ".md")
+
+  cat > "$filepath" << 'HEREDOC'
+---
+tags: [concept]
+---
+
+## Definition / 定义
+
+## Related literature / 相关文献
+
+## Notes / 备注
+HEREDOC
+
+  echo ""
+  echo "✓ 已创建: ${filepath#$VAULT/}"
+  open_in_obsidian "$filepath"
+}
+
+# ── obs find ─────────────────────────────────────────────
+
+cmd_find() {
+  require_vault
+  load_config
+
+  echo "── 搜索笔记 ──"
+  echo ""
+  echo "搜索方式："
+  echo "  1) 按 tag"
+  echo "  2) 按关键词"
+  printf "你的选择 (1/2): "
+  read -r mode
+
+  local pattern=""
+  case "$mode" in
+    1)
+      if [ ${#ALL_TAGS[@]} -eq 0 ]; then
+        echo "没有配置 tag"; return 1
+      fi
+      echo ""
+      echo "选择 tag："
+      for i in "${!ALL_TAGS[@]}"; do
+        echo "  $((i+1))) ${ALL_TAGS[$i]}"
+      done
+      printf "你的选择: "
+      read -r choice
+      local idx=$((choice-1))
+      if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#ALL_TAGS[@]}" ]; then
+        pattern="${ALL_TAGS[$idx]}"
+      else
+        echo "无效选择"; return 1
+      fi
+      ;;
+    2)
+      printf "输入关键词: "
+      read -r pattern
+      if [ -z "$pattern" ]; then
+        echo "关键词不能为空"; return 1
+      fi
+      ;;
+    *) echo "无效选择"; return 1 ;;
+  esac
+
+  echo ""
+  echo "搜索结果："
+  echo "────────────"
+
+  local results=()
+  while IFS= read -r line; do
+    results+=("$line")
+  done < <(grep -rl "$pattern" "$VAULT" --include="*.md" 2>/dev/null \
+    | grep -v '/templates/' \
+    | grep -v '/\.obsidian/' \
+    | grep -v '/obs-research-cli/' \
+    | grep -v '/obs-cli/' \
+    | sort)
+
+  if [ ${#results[@]} -eq 0 ]; then
+    echo "  没有找到匹配的笔记"
+    return 0
+  fi
+
+  for i in "${!results[@]}"; do
+    echo "  $((i+1))) ${results[$i]#$VAULT/}"
+  done
+
+  echo ""
+  printf "打开哪个？（输入编号，回车跳过）: "
+  read -r open_choice
+  if [ -n "$open_choice" ]; then
+    local oidx=$((open_choice-1))
+    if [ "$oidx" -ge 0 ] && [ "$oidx" -lt "${#results[@]}" ]; then
+      open_in_obsidian "${results[$oidx]}"
+    fi
+  fi
+}
+
+# ── obs list ─────────────────────────────────────────────
+
+cmd_list() {
+  require_vault
+  load_config
+
+  echo "── 最近修改的笔记 ──"
+  echo ""
+
+  local results=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && results+=("$line")
+  done < <(find "$VAULT" -name "*.md" \
+    -not -path "*/.obsidian/*" \
+    -not -path "*/templates/*" \
+    -not -path "*/obs-research-cli/*" \
+    -not -path "*/obs-cli/*" \
+    -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -10)
+
+  if [ ${#results[@]} -eq 0 ]; then
+    echo "  还没有笔记"
+    return 0
+  fi
+
+  for i in "${!results[@]}"; do
+    local file="${results[$i]}"
+    local rel="${file#$VAULT/}"
+    local mtime
+    mtime=$(stat -f "%Sm" -t "%m-%d %H:%M" "$file" 2>/dev/null || stat -c "%y" "$file" 2>/dev/null | cut -c6-16)
+    echo "  $((i+1))) [$mtime] $rel"
+  done
+
+  echo ""
+  printf "打开哪个？（输入编号，回车跳过）: "
+  read -r open_choice
+  if [ -n "$open_choice" ]; then
+    local oidx=$((open_choice-1))
+    if [ "$oidx" -ge 0 ] && [ "$oidx" -lt "${#results[@]}" ]; then
+      open_in_obsidian "${results[$oidx]}"
+    fi
+  fi
+}
+
+# ── obs quick ────────────────────────────────────────────
+
+cmd_quick() {
+  require_vault
+  load_config
+
+  local content="$*"
+  if [ -z "$content" ]; then
+    echo "用法: obs quick \"你的想法\"" >&2
+    return 1
+  fi
+
+  local today
+  today=$(date +%Y-%m-%d)
+  local now
+  now=$(date +%H:%M)
+
+  local inbox_dir="$VAULT/Inbox"
+  mkdir -p "$inbox_dir"
+
+  local filepath="$inbox_dir/$today.md"
+
+  # create file with header if it doesn't exist
+  if [ ! -f "$filepath" ]; then
+    cat > "$filepath" << HEREDOC
+---
+tags: [inbox]
+date: $today
+---
+
+# $today 快速笔记
+
+HEREDOC
+  fi
+
+  # append the new entry
+  echo "- **$now** $content" >> "$filepath"
+
+  echo "✓ [$now] $content"
+  echo "  → Inbox/$today.md"
+}
+
+# ── obs bib ──────────────────────────────────────────────
+
+cmd_bib() {
+  require_vault
+  load_config
+
+  local doi="$1"
+  if [ -z "$doi" ]; then
+    printf "输入 DOI（如 10.1016/j.tics.2023.01.001）: "
+    read -r doi
+  fi
+
+  if [ -z "$doi" ]; then
+    echo "DOI 不能为空" >&2
+    return 1
+  fi
+
+  # clean doi: remove URL prefix if present
+  doi="${doi#https://doi.org/}"
+  doi="${doi#http://doi.org/}"
+  doi="${doi#doi:}"
+
+  echo "正在获取文献信息..."
+
+  local json
+  json=$(curl -s -L -H "Accept: application/json" "https://api.crossref.org/works/${doi}" 2>/dev/null)
+
+  if [ -z "$json" ] || echo "$json" | grep -q '"status":"failed"'; then
+    echo "错误：无法获取 DOI $doi 的信息，请检查 DOI 是否正确" >&2
+    return 1
+  fi
+
+  # parse with python3 (available on macOS)
+  local parsed
+  parsed=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    msg = data.get('message', {})
+
+    # title
+    titles = msg.get('title', [])
+    title = titles[0] if titles else 'Untitled'
+
+    # authors
+    authors_list = msg.get('author', [])
+    if authors_list:
+        first = authors_list[0].get('family', '')
+        if len(authors_list) > 1:
+            authors_str = first + ' et al.'
+        else:
+            authors_str = first
+    else:
+        authors_str = 'Unknown'
+    first_author = authors_list[0].get('family', 'Unknown') if authors_list else 'Unknown'
+
+    # year
+    date_parts = msg.get('published-print', msg.get('published-online', msg.get('created', {})))
+    parts = date_parts.get('date-parts', [[0]])[0] if date_parts else [0]
+    year = str(parts[0]) if parts else 'Unknown'
+
+    # journal
+    journals = msg.get('container-title', [])
+    journal = journals[0] if journals else ''
+
+    # abstract
+    abstract = msg.get('abstract', '')
+    # clean HTML tags from abstract
+    import re
+    abstract = re.sub(r'<[^>]+>', '', abstract)
+    if len(abstract) > 500:
+        abstract = abstract[:500] + '...'
+
+    print(f'FIRST_AUTHOR={first_author}')
+    print(f'AUTHORS={authors_str}')
+    print(f'YEAR={year}')
+    print(f'TITLE={title}')
+    print(f'JOURNAL={journal}')
+    print(f'ABSTRACT={abstract}')
+except Exception as e:
+    print(f'ERROR={e}', file=sys.stderr)
+    sys.exit(1)
+" <<< "$json")
+
+  if [ $? -ne 0 ]; then
+    echo "错误：解析文献数据失败" >&2
+    return 1
+  fi
+
+  # extract fields
+  local first_author authors year title journal abstract
+  first_author=$(echo "$parsed" | grep "^FIRST_AUTHOR=" | cut -d= -f2-)
+  authors=$(echo "$parsed" | grep "^AUTHORS=" | cut -d= -f2-)
+  year=$(echo "$parsed" | grep "^YEAR=" | cut -d= -f2-)
+  title=$(echo "$parsed" | grep "^TITLE=" | cut -d= -f2-)
+  journal=$(echo "$parsed" | grep "^JOURNAL=" | cut -d= -f2-)
+  abstract=$(echo "$parsed" | grep "^ABSTRACT=" | cut -d= -f2-)
+
+  echo ""
+  echo "  标题:   $title"
+  echo "  作者:   $authors"
+  echo "  年份:   $year"
+  echo "  期刊:   $journal"
+  echo ""
+
+  # generate short title (first 5 words)
+  local short_title
+  short_title=$(echo "$title" | awk '{for(i=1;i<=5&&i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ *$//')
+
+  local tags
+  tags=$(pick_tags)
+
+  local filename="$first_author $year - $short_title"
+  local filepath
+  filepath=$(safe_path "$VAULT/Literature" "$filename" ".md")
+
+  cat > "$filepath" << HEREDOC
+---
+tags: $tags
+year: $year
+authors: $authors
+journal: $journal
+doi: $doi
+---
+
+## Abstract / 摘要
+
+$abstract
+
+## Summary / 核心发现
+<!-- 2–3 sentences on the key findings / 2–3 句概括核心发现 -->
+
+## Methods / 方法
+<!-- Paradigm, participants, key variables / 实验范式、被试、关键变量 -->
+
+## Relevance / 与我研究的关系
+<!-- How does this relate to my research? / 对我的研究有什么启发？ -->
+
+## Key concepts / 关键概念
+<!-- Link related notes with \`[[note name]]\` / 用 \`[[笔记名]]\` 链接相关笔记 -->
+HEREDOC
+
+  echo "✓ 已创建: ${filepath#$VAULT/}"
+  open_in_obsidian "$filepath"
+}
+
+# ── obs status ───────────────────────────────────────────
+
+cmd_status() {
+  require_vault
+  load_config
+
+  echo "── 研究仪表盘 ──"
+  echo ""
+
+  collect_md_files
+
+  local total=${#MD_FILES[@]}
+  echo "  笔记总数: $total"
+  echo ""
+
+  # count per folder
+  echo "  各文件夹："
+  for f in "${FOLDERS[@]}"; do
+    local count=0
+    for md in "${MD_FILES[@]}"; do
+      if [[ "$md" == "$VAULT/$f/"* ]]; then
+        count=$((count+1))
+      fi
+    done
+    if [ "$count" -gt 0 ]; then
+      echo "    $f/  $count 篇"
+    fi
+  done
+
+  # inbox
+  local inbox_count=0
+  for md in "${MD_FILES[@]}"; do
+    if [[ "$md" == "$VAULT/Inbox/"* ]]; then
+      inbox_count=$((inbox_count+1))
+    fi
+  done
+  if [ "$inbox_count" -gt 0 ]; then
+    echo "    Inbox/  $inbox_count 篇"
+  fi
+  echo ""
+
+  # todos
+  local todo_count=0
+  local todo_files=()
+  for md in "${MD_FILES[@]}"; do
+    if grep -ql "todo\|TODO\|#todo" "$md" 2>/dev/null; then
+      todo_count=$((todo_count+1))
+      todo_files+=("$md")
+    fi
+  done
+  if [ "$todo_count" -gt 0 ]; then
+    echo "  待处理 (#todo): $todo_count 篇"
+    for tf in "${todo_files[@]:0:5}"; do
+      echo "    - ${tf#$VAULT/}"
+    done
+    if [ "$todo_count" -gt 5 ]; then
+      echo "    ... 还有 $((todo_count-5)) 篇"
+    fi
+    echo ""
+  fi
+
+  # orphan notes (no [[ links to other notes, and no other notes link to them)
+  echo "  孤立笔记（没有任何 [[链接]] 的）："
+  local orphan_count=0
+  for md in "${MD_FILES[@]}"; do
+    local basename_no_ext
+    basename_no_ext=$(basename "$md" .md)
+    # check if this note contains any [[ links
+    local has_outgoing=false
+    if grep -q '\[\[' "$md" 2>/dev/null; then
+      has_outgoing=true
+    fi
+    # check if any other note links to this one
+    local has_incoming=false
+    if grep -rl "\[\[$basename_no_ext" "$VAULT" --include="*.md" 2>/dev/null \
+      | grep -v "$md" | grep -q .; then
+      has_incoming=true
+    fi
+    if [ "$has_outgoing" = false ] && [ "$has_incoming" = false ]; then
+      # skip system files
+      case "$basename_no_ext" in
+        "START HERE") continue ;;
+      esac
+      echo "    - ${md#$VAULT/}"
+      orphan_count=$((orphan_count+1))
+      if [ "$orphan_count" -ge 10 ]; then
+        echo "    ... (只显示前 10 个)"
+        break
+      fi
+    fi
+  done
+  if [ "$orphan_count" -eq 0 ]; then
+    echo "    无"
+  fi
+
+  echo ""
+
+  # recent activity
+  echo "  最近 3 天活跃："
+  local three_days_ago
+  if date -v-3d &>/dev/null; then
+    three_days_ago=$(date -v-3d +%s)
+  else
+    three_days_ago=$(date -d "3 days ago" +%s 2>/dev/null || echo 0)
+  fi
+  local recent_count=0
+  for md in "${MD_FILES[@]}"; do
+    local mtime
+    if stat -f "%m" "$md" &>/dev/null; then
+      mtime=$(stat -f "%m" "$md")
+    else
+      mtime=$(stat -c "%Y" "$md" 2>/dev/null || echo 0)
+    fi
+    if [ "$mtime" -ge "$three_days_ago" ]; then
+      recent_count=$((recent_count+1))
+    fi
+  done
+  echo "    $recent_count 篇笔记有更新"
+}
+
+# ── obs moc ──────────────────────────────────────────────
+
+cmd_moc() {
+  require_vault
+  load_config
+
+  local tag="$1"
+  if [ -z "$tag" ]; then
+    printf "为哪个 tag 生成索引？: "
+    read -r tag
+  fi
+  if [ -z "$tag" ]; then
+    echo "tag 不能为空" >&2
+    return 1
+  fi
+
+  echo "正在扫描 #$tag 笔记..."
+
+  local matches=()
+  while IFS= read -r line; do
+    matches+=("$line")
+  done < <(grep -rl "$tag" "$VAULT" --include="*.md" 2>/dev/null \
+    | grep -v '/templates/' \
+    | grep -v '/\.obsidian/' \
+    | grep -v '/obs-research-cli/' \
+    | sort)
+
+  if [ ${#matches[@]} -eq 0 ]; then
+    echo "没有找到包含 #$tag 的笔记"
+    return 0
+  fi
+
+  local today
+  today=$(date +%Y-%m-%d)
+  local moc_path
+  moc_path=$(safe_path "$VAULT" "MOC - $tag" ".md")
+
+  # build MOC content
+  {
+    echo "---"
+    echo "tags: [moc, $tag]"
+    echo "date: $today"
+    echo "---"
+    echo ""
+    echo "# $tag 索引"
+    echo ""
+    local match_count=${#matches[@]}
+    echo "自动生成于 ${today}, 共 ${match_count} 篇相关笔记。"
+    echo ""
+
+    # group by folder
+    local current_folder=""
+    for md in "${matches[@]}"; do
+      local rel="${md#$VAULT/}"
+      local folder
+      folder=$(dirname "$rel")
+      if [ "$folder" = "." ]; then folder="根目录"; fi
+
+      if [ "$folder" != "$current_folder" ]; then
+        current_folder="$folder"
+        echo "## $folder"
+        echo ""
+      fi
+
+      local name
+      name=$(basename "$md" .md)
+
+      # try to extract the first content line under the Summary section
+      local summary=""
+      summary=$(grep -m1 "^## Summary" -A1 "$md" 2>/dev/null | tail -1 | sed 's/<!--.*-->//')
+      if [ -z "$summary" ] || [ "$summary" = "---" ] || [[ "$summary" =~ ^[[:space:]]*$ ]]; then
+        summary=""
+      fi
+
+      if [ -n "$summary" ] && [ "$summary" != "" ]; then
+        echo "- [[$name]] — $summary"
+      else
+        echo "- [[$name]]"
+      fi
+    done
+    echo ""
+  } > "$moc_path"
+
+  echo ""
+  echo "✓ 已生成: ${moc_path#$VAULT/}"
+  echo "  包含 ${#matches[@]} 篇笔记"
+  open_in_obsidian "$moc_path"
+}
+
+# ── obs links ────────────────────────────────────────────
+
+cmd_links() {
+  require_vault
+  load_config
+
+  echo "── 发现缺失的链接 ──"
+  echo ""
+
+  # collect all concept names (from Concepts/ folder and from existing [[ ]] links)
+  local concepts=()
+
+  # from Concepts/ folder
+  if [ -d "$VAULT/Concepts" ]; then
+    while IFS= read -r f; do
+      local name
+      name=$(basename "$f" .md)
+      concepts+=("$name")
+    done < <(find "$VAULT/Concepts" -name "*.md" 2>/dev/null)
+  fi
+
+  # from all [[ ]] links across vault
+  collect_md_files
+  while IFS= read -r link; do
+    [ -n "$link" ] && concepts+=("$link")
+  done < <(grep -oh '\[\[[^]|]*' "$VAULT"/*.md "$VAULT"/**/*.md 2>/dev/null \
+    | sed 's/\[\[//' | sort -u)
+
+  # deduplicate
+  local unique_concepts=()
+  local seen=""
+  for c in "${concepts[@]}"; do
+    if [[ "$seen" != *"|$c|"* ]]; then
+      unique_concepts+=("$c")
+      seen+="|$c|"
+    fi
+  done
+
+  if [ ${#unique_concepts[@]} -eq 0 ]; then
+    echo "  还没有概念可以检查（先创建一些笔记和概念卡片）"
+    return 0
+  fi
+
+  echo "  检查 ${#unique_concepts[@]} 个概念..."
+  echo ""
+
+  local found=0
+  for concept in "${unique_concepts[@]}"; do
+    # skip very short concept names (likely false positives)
+    if [ ${#concept} -lt 3 ]; then continue; fi
+
+    for md in "${MD_FILES[@]}"; do
+      # skip the concept's own file
+      local bn
+      bn=$(basename "$md" .md)
+      if [ "$bn" = "$concept" ]; then continue; fi
+
+      # check if file mentions the concept but doesn't link it
+      if grep -q "$concept" "$md" 2>/dev/null; then
+        if ! grep -q "\[\[$concept" "$md" 2>/dev/null; then
+          echo "  ${md#$VAULT/}"
+          echo "    提到了 \"$concept\" 但没有链接 → 建议改为 [[$concept]]"
+          echo ""
+          found=$((found+1))
+          if [ "$found" -ge 20 ]; then
+            echo "  ... 只显示前 20 个建议"
+            return 0
+          fi
+        fi
+      fi
+    done
+  done
+
+  if [ "$found" -eq 0 ]; then
+    echo "  所有概念都已正确链接！"
+  fi
+}
+
+# ── obs export ───────────────────────────────────────────
+
+cmd_export() {
+  require_vault
+  load_config
+
+  local tag="$1"
+  if [ -z "$tag" ]; then
+    printf "导出哪个 tag 的文献？: "
+    read -r tag
+  fi
+  if [ -z "$tag" ]; then
+    echo "tag 不能为空" >&2
+    return 1
+  fi
+
+  echo "正在导出 #$tag 文献..."
+
+  local matches=()
+  while IFS= read -r line; do
+    matches+=("$line")
+  done < <(grep -rl "$tag" "$VAULT/Literature" --include="*.md" 2>/dev/null | sort)
+
+  if [ ${#matches[@]} -eq 0 ]; then
+    echo "没有找到 Literature/ 中包含 #$tag 的笔记"
+    return 0
+  fi
+
+  local today
+  today=$(date +%Y-%m-%d)
+
+  # output to both screen and file
+  local export_file="$VAULT/export-${tag}-${today}.md"
+
+  {
+    echo "# $tag 文献综述表"
+    echo ""
+    local match_count=${#matches[@]}
+    echo "导出于 $today, 共 ${match_count} 篇。"
+    echo ""
+    echo "| 作者 | 年份 | 标题 | 期刊 |"
+    echo "|------|------|------|------|"
+
+    for md in "${matches[@]}"; do
+      local name
+      name=$(basename "$md" .md)
+      local authors year journal
+      authors=$(grep "^authors:" "$md" 2>/dev/null | cut -d: -f2- | xargs)
+      year=$(grep "^year:" "$md" 2>/dev/null | cut -d: -f2- | xargs)
+      journal=$(grep "^journal:" "$md" 2>/dev/null | cut -d: -f2- | xargs)
+      echo "| $authors | $year | [[$name]] | $journal |"
+    done
+    echo ""
+  } | tee "$export_file"
+
+  echo ""
+  echo "✓ 已导出到: ${export_file#$VAULT/}"
+  echo "  可以直接复制表格到论文中"
+}
+
+# ── obs help ─────────────────────────────────────────────
+
+cmd_help() {
+  cat << 'EOF'
+obs — Obsidian research notes CLI
+
+Note creation:
+  obs quick "idea"    Zero-interaction capture; appends to today's Inbox
+  obs lit             New literature note (interactive prompts)
+  obs bib <DOI>       Create literature note from DOI (auto-fetches metadata via Crossref)
+  obs idea            New research idea / thought
+  obs concept         New concept card
+
+Search & browse:
+  obs find            Search notes by tag or keyword
+  obs list            List the 10 most recently modified notes
+  obs status          Research dashboard: counts, todos, orphan notes, recent activity
+
+Knowledge organization:
+  obs moc <tag>       Generate a Map of Content (MOC) index for a tag
+  obs links           Find concepts mentioned in notes but not yet wikilinked
+  obs export <tag>    Export matching literature as a Markdown table
+
+Setup:
+  obs init            First-time vault setup; re-run to update projects/tags
+  obs tag             Manage the CLI's tag list (add / remove / sync from vault)
+  obs help            Show this help (English)
+
+Run all commands from inside your Obsidian vault directory.
+EOF
+}
+
+# ── main ─────────────────────────────────────────────────
+
+case "${1:-}" in
+  init)    cmd_init ;;
+  lit)     cmd_lit ;;
+  idea)    cmd_idea ;;
+  concept) cmd_concept ;;
+  find)    cmd_find ;;
+  list)    cmd_list ;;
+  quick)   shift; cmd_quick "$@" ;;
+  bib)     cmd_bib "$2" ;;
+  status)  cmd_status ;;
+  moc)     cmd_moc "$2" ;;
+  links)   cmd_links ;;
+  export)  cmd_export "$2" ;;
+  tag)     cmd_tag ;;
+  help|-h|--help) cmd_help ;;
+  *)
+    echo "obs — Obsidian 研究笔记 CLI"
+    echo ""
+    echo "笔记创建："
+    echo "  obs quick \"想法\"   快速记录（零交互，追加到今日 Inbox）"
+    echo "  obs lit            新建文献笔记（交互式）"
+    echo "  obs bib <DOI>      用 DOI 自动创建文献笔记"
+    echo "  obs idea           新建研究想法"
+    echo "  obs concept        新建概念卡片"
+    echo ""
+    echo "查找与浏览："
+    echo "  obs find           搜索笔记"
+    echo "  obs list           查看最近修改的笔记"
+    echo "  obs status         研究仪表盘（统计概览）"
+    echo ""
+    echo "知识整理："
+    echo "  obs moc <tag>      生成某个 tag 的索引笔记 (MOC)"
+    echo "  obs links          发现缺失的 wikilink"
+    echo "  obs export <tag>   导出文献为 Markdown 表格"
+    echo ""
+    echo "初始化与帮助："
+    echo "  obs init           首次初始化 vault；已初始化时进入更新模式（含项目/tag 管理）"
+    echo "  obs tag            管理 tag 列表（添加/删除/从 vault 同步）"
+    echo "  obs help           English help"
+    echo ""
+    echo "使用前先 cd 到你的 Obsidian vault 目录。"
+    ;;
+esac
