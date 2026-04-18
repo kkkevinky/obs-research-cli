@@ -1,6 +1,6 @@
 # Obs-Research-CLI
 
-在终端中快速创建和管理 Obsidian 研究笔记。专为科研工作者设计，无需记忆复杂操作。
+在终端中快速创建和管理 Obsidian 研究笔记。无需记忆复杂操作。
 
 ## 安装
 
@@ -15,14 +15,14 @@ bash install.sh
 ## 快速开始
 
 ```bash
-# 1. cd 到你的 Obsidian vault
+# 1. cd 至 Obsidian vault
 cd ~/your-obsidian-vault
 
 # 2. 初始化（只需一次）
 obs init
 
 # 3. 开始使用
-obs quick "一个灵感"    # 零交互快速记录
+obs quick "your idea"    # 零交互快速记录
 obs bib <DOI>          # 用 DOI 自动创建文献笔记
 obs lit                # 手动创建文献笔记
 obs idea               # 记录研究想法
@@ -63,22 +63,21 @@ obs status             # 查看研究仪表盘
 |------|------|
 | `obs init` | 首次使用时初始化 vault；已初始化时进入更新模式（项目/tag 管理） |
 | `obs tag` | 管理 CLI 的 tag 列表：添加、删除、从 vault 自动同步 |
-| `obs help` | English help — show all commands and their purposes |
+| `obs help` | help — show all commands and their purposes |
 
 #### `obs tag` 同步流程
 
 - 扫描 vault 所有笔记，提取 YAML frontmatter（`tags:` / `tag:` 三种格式）和正文里的 `#tag`
 - **自动排除**：fenced 代码块、inline code、markdown 锚点链接（`](#anchor)`）里的 `#`
-- **大小写不敏感去重**：`#Theta` 和 `#theta` 算同一个，保留首次出现的大小写
-- 展示发现的新 tag，支持按编号**剔除奇怪的 tag**，最终二次确认
-- 永远只追加，不会删除你 `.obs-config` 里已有的 tag
+- **大小写不敏感去重**：`#Theta` 和 `#theta` 为同一个，保留首次出现的tag
+- 展示发现的新 tag，支持按编号**剔除多余/误建的 tag**，最终由本人二次确认
 
 ## 典型工作流
 
 ```
 读论文 → obs bib <DOI> → 自动创建笔记 → 在 Obsidian 中填写想法
-有灵感 → obs quick "想法" → 零摩擦记录到 Inbox
-写综述 → obs moc perception → 自动生成文献索引
+有idea → obs quick "idea" → 零摩擦记录到 Inbox
+写综述 → obs moc <tag> → 自动生成tag文献索引
 查遗漏 → obs links → 发现没有链接的概念
 导表格 → obs export perception → 生成文献对比表
 ```
@@ -109,7 +108,7 @@ TAGS=tag1,tag2,tag3
 
 ## 写笔记的小技巧
 
-遇到重要概念，用双括号 `[[概念名]]` 包裹（例如 `[[concept name]]`）。Obsidian 会自动追踪所有引用，随着笔记积累，你的知识网络会自然形成。
+用双括号 `[[concept]]`包裹重要概念 （例如 `[[concept name]]`）。Obsidian 会自动追踪所有引用，随着笔记积累，知识网络会自然形成。
 
 ## License
 
