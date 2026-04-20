@@ -1,6 +1,6 @@
 # Obs-Research-CLI
 
-在终端中快速创建和管理 Obsidian 研究笔记。无需记忆复杂操作。
+在终端中快速创建和管理 Obsidian 研究笔记。
 
 ## 安装
 
@@ -37,9 +37,9 @@ obs status             # 查看研究仪表盘
 |------|------|
 | `obs quick "想法"` | 零交互快速记录，追加到今日 Inbox |
 | `obs lit` | 交互式创建文献笔记 |
-| `obs bib <DOI>` | 从 DOI 自动获取论文信息，生成文献笔记 |
-| `obs idea` | 创建研究想法笔记 |
-| `obs concept` | 创建概念卡片 |
+| `obs bib <DOI>` | 从 DOI 自动获取论文信息|
+| `obs idea` | 创建idea笔记 |
+| `obs concept` | 创建concept卡片 |
 
 ### 查找与浏览
 
@@ -54,7 +54,7 @@ obs status             # 查看研究仪表盘
 | 命令 | 说明 |
 |------|------|
 | `obs moc <tag>` | 自动生成某个 tag 的索引笔记 (Map of Content) |
-| `obs links` | 扫描笔记，发现提到但没有 `[[链接]]` 的概念 |
+| `obs links` | 扫描笔记，发现提到但没有 `[[link]]` 的概念 |
 | `obs export <tag>` | 导出文献为 Markdown |
 
 ### 初始化与帮助
@@ -102,13 +102,13 @@ TAGS=tag1,tag2,tag3
 
 - macOS 或 Linux（macOS 自带 `open`；Linux 需 `xdg-open`）
 - Bash 3.2+（macOS 自带）
-- Python 3（`obs bib` / `obs init` / `obs tag` 用到，macOS 自带）
+- Python 3（`obs bib` / `obs init` / `obs tag`，macOS 自带）
 - curl（`obs bib` 查 Crossref 用，macOS 自带）
 - [Obsidian](https://obsidian.md)
 
 ## 写笔记的小技巧
 
-用双括号 `[[concept]]`包裹重要概念 （例如 `[[concept name]]`）。Obsidian 会自动追踪所有引用，随着笔记积累，知识网络会自然形成。
+用双括号 `[[concept]]`包裹重要概念 （例如 `[[concept name]]`）。Obsidian 会自动追踪所有引用，随着笔记积累形成network。
 
 ## License
 
