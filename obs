@@ -645,6 +645,67 @@ cmd_tag() {
   esac
 }
 
+# ── obs me ───────────────────────────────────────────────
+
+cmd_me() {
+  require_vault
+
+  local filepath="$VAULT/About me.md"
+
+  if [ -f "$filepath" ]; then
+    echo "✓ About me.md 已存在，正在 Obsidian 中打开"
+    open_in_obsidian "$filepath"
+    return 0
+  fi
+
+  echo "── obs me ──"
+  echo ""
+  echo "生成研究者个人介绍（所有字段都可回车跳过，后续可在 Obsidian 里补）"
+  echo ""
+
+  local name position interests orcid email
+  printf "Name / 姓名: "                       ; read -r name
+  printf "Position & affiliation / 职位与单位: "; read -r position
+  printf "Research interests / 研究方向: "     ; read -r interests
+  printf "ORCID: "                             ; read -r orcid
+  printf "Contact email: "                     ; read -r email
+
+  local heading="${name:-About me}"
+
+  cat > "$filepath" << HEREDOC
+---
+tags: [profile]
+---
+
+# $heading
+
+**Position / 职位**
+$position
+
+**Research interests / 研究方向**
+$interests
+
+**ORCID**
+$orcid
+
+**Contact**
+$email
+
+## Current projects / 进行中的项目
+<!-- Link to project MOCs / main notes with \`[[note name]]\` / 用 \`[[笔记名]]\` 链接到项目主笔记或 MOC -->
+
+## Key concepts / 核心概念
+<!-- Link concept cards from Concepts/ with \`[[concept name]]\` / 用 \`[[概念名]]\` 链接 Concepts/ 下的概念卡片 -->
+
+## Selected publications / 代表作
+<!-- Link literature notes with \`[[author year - title]]\` / 用 \`[[作者 年份 - 标题]]\` 链接 Literature/ 下的文献笔记 -->
+HEREDOC
+
+  echo ""
+  echo "✓ 已创建: About me.md"
+  open_in_obsidian "$filepath"
+}
+
 # ── obs lit ──────────────────────────────────────────────
 
 cmd_lit() {
@@ -1450,6 +1511,7 @@ Knowledge organization:
 
 Setup:
   obs init            First-time vault setup; re-run to update projects/tags
+  obs me              Create a researcher profile note (About me.md) at vault root
   obs tag             Manage the CLI's tag list (add / remove / sync from vault)
   obs help            Show this help (English)
 
@@ -1472,6 +1534,7 @@ case "${1:-}" in
   moc)     cmd_moc "$2" ;;
   links)   cmd_links ;;
   export)  cmd_export "$2" ;;
+  me)      cmd_me ;;
   tag)     cmd_tag ;;
   help|-h|--help) cmd_help ;;
   *)
@@ -1496,6 +1559,7 @@ case "${1:-}" in
     echo ""
     echo "初始化与帮助："
     echo "  obs init           首次初始化 vault；已初始化时进入更新模式（含项目/tag 管理）"
+    echo "  obs me             生成研究者个人介绍 About me.md（图谱中心节点）"
     echo "  obs tag            管理 tag 列表（添加/删除/从 vault 同步）"
     echo "  obs help           English help"
     echo ""

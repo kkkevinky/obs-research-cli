@@ -62,6 +62,7 @@ obs status             # 查看研究仪表盘
 | 命令 | 说明 |
 |------|------|
 | `obs init` | 首次使用时初始化 vault；已初始化时进入更新模式（项目/tag 管理） |
+| `obs me` | 生成研究者个人介绍 `About me.md` —— 作为图谱中心节点 |
 | `obs tag` | 管理 CLI 的 tag 列表：添加、删除、从 vault 自动同步 |
 | `obs help` | help — show all commands and their purposes |
 
