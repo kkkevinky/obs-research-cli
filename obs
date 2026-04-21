@@ -344,6 +344,29 @@ PYEOF
     echo "  可手动在 Obsidian 图谱 Filters 中添加：-path:\"templates\" -file:\"START HERE\""
   fi
 
+  # Configure Obsidian's attachment folder to point to ./attachments
+  if command -v python3 &>/dev/null; then
+    python3 - << 'PYEOF' || true
+import json, os
+path = ".obsidian/app.json"
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    cfg = {}
+if cfg.get("attachmentFolderPath"):
+    print(f"  跳过附件路径：已配置为 '{cfg['attachmentFolderPath']}'")
+else:
+    cfg["attachmentFolderPath"] = "attachments"
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+    print("  配置附件路径：attachments/")
+PYEOF
+  else
+    echo "  跳过附件路径配置（未安装 python3）"
+    echo "  可在 Obsidian: Settings → Files & Links → Default location for new attachments → 设为 attachments"
+  fi
+
   echo ""
   echo "✓ 初始化完成！输入 obs 查看所有命令。"
 }
