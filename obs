@@ -1098,14 +1098,14 @@ except Exception as e:
   echo "  期刊:   $journal"
   echo ""
 
-  # generate short title (first 5 words)
-  local short_title
-  short_title=$(echo "$title" | awk '{for(i=1;i<=5&&i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ *$//')
+  # use full title; replace chars that are unsafe/ugly in filenames, strip trailing period
+  local safe_title
+  safe_title=$(echo "$title" | tr '/:?*<>|' '-------' | tr -s ' ' | sed 's/^ *//;s/ *$//;s/\.$//')
 
   local tags
   tags=$(pick_tags)
 
-  local filename="$first_author $year - $short_title"
+  local filename="$first_author $year - $safe_title"
   local filepath
   filepath=$(safe_path "$VAULT/Literature" "$filename" ".md")
 
