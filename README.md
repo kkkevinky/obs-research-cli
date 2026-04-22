@@ -110,6 +110,7 @@ TAGS=tag1,tag2,tag3
 ## 写笔记的小技巧
 
 用双括号 `[[concept]]`包裹重要概念 （例如 `[[concept name]]`）。Obsidian 会自动追踪所有引用，随着笔记积累形成network。
+注意：如果没有使用obs concept而是直接通过[[]]创建的concept，可以自行拖动至Concepts/文件夹。
 
 ## License
 
